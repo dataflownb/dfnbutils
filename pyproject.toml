@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "dfnbutils"
-version = "1.0.0b"  # Replace with the actual version string
+version = "1.0.0b1"  # Replace with the actual version string
 description = "Utilities for working with IPykernel/DFKernel notebooks"
 readme = "README.md"
 requires-python = ">=3.9"
@@ -21,19 +21,6 @@ classifiers = [
 keywords = ["Jupyter", "notebooks", "conversion", "utilities"]
 urls = {homepage = "https://github.com/dataflownb/dfnbutils"}
 
-dependencies = [
-"notebook>=5.4",
-"ipython>=7.17.0",
-"astor>=0.7",
-"asttokens>1.1",
-]
-
-[project.optional-dependencies]
-test = [
-    "nbformat",
-    "nose-timer",
-    "nbconvert"
-]
-
 [tool.setuptools]
 packages = ["dfnbutils"]
+include-package-data = false
