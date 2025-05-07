@@ -59,6 +59,12 @@ def ref_replacer(ref):
 def dollar_replacer(ref):
     return str(ref)
 
+#used in dfexport
+def underscore_replacer(ref):
+    qualifier = ref.ref_qualifier if ref.ref_qualifier is not None else ''
+    cell_tag = f'{ref.cell_tag}_' if ref.cell_tag else ''
+    return f'{ref.name}_{qualifier}{cell_tag}{ref.cell_id}'
+
 def update_refs(refs, dataflow_state, execution_count, input_tags):
     for ref in refs:
         if ref.ref_qualifier == '^' or (not ref.cell_tag and not ref.cell_id):
@@ -99,181 +105,186 @@ def run_replacer(s, refs, replace_f):
             line[:ref.start_pos[1]] + replace_f(ref) + line[ref.end_pos[1]:]
     return '\n'.join(code_arr)    
 
-def ground_refs(s, dataflow_state, execution_count, replace_f=ref_replacer, input_tags={}, output_tags={}, cell_refs = {}, reversion = False, display_code = False):
-    updates = []
+class DataflowLinker(ast.NodeVisitor):
+    def __init__(self, dataflow_state, execution_count, output_tags, cell_refs, reversion, display_code):
+        super().__init__()
+        self.scope = [set()]
+        self.updates = []
+        self.dataflow_state = dataflow_state
+        self.execution_count = execution_count
+        self.output_tags = output_tags
+        self.cell_refs = cell_refs
+        self.reversion = reversion
+        self.display_code = display_code
 
-    class DataflowLinker(ast.NodeVisitor):
-        def __init__(self):
-            super().__init__()
-            self.scope = [set()]
-            self.updates = []
+    def visit_Name(self, node):
+        # FIXME what to do with del?
+        if isinstance(node.ctx, ast.Store):
+            # print("STORE", name.id, file=sys.__stdout__)
+            self.scope[-1].add(node.id)
+        elif isinstance(node.ctx, ast.Del):
+            self.scope[-1].discard(node.id)
+        elif isinstance(node.ctx, ast.Load) and all(node.id not in s for s in self.scope):
+            output_tags_exists = self.output_tags.get(node.id)
+            is_variable_exported_only_once = output_tags_exists and len(self.output_tags[node.id]) == 1
+            is_variable_ref_exist_in_cell_refs = self.cell_refs.get(node.id) and len(self.cell_refs[node.id]) == 1
+            
+            if not self.reversion:
+                if self.dataflow_state.has_external_link(node.id, self.execution_count):
+                    cell_id = self.dataflow_state.get_external_link(node.id, self.execution_count)
 
-        def visit_Name(self, node):
-            # FIXME what to do with del?
-            if isinstance(node.ctx, ast.Store):
-                # print("STORE", name.id, file=sys.__stdout__)
-                self.scope[-1].add(node.id)
-            elif isinstance(node.ctx, ast.Del):
-                self.scope[-1].discard(node.id)
-            elif isinstance(node.ctx, ast.Load) and all(node.id not in s for s in self.scope):
-                output_tags_exists = output_tags.get(node.id)
-                is_variable_exported_only_once = output_tags_exists and len(output_tags[node.id]) == 1
-                is_variable_ref_exist_in_cell_refs = cell_refs.get(node.id) and len(cell_refs[node.id]) == 1
-                
-                if not reversion:
-                    if dataflow_state.has_external_link(node.id, execution_count):
-                        cell_id = dataflow_state.get_external_link(node.id, execution_count)
-
-                        if not (display_code and is_variable_exported_only_once and cell_id in output_tags[node.id]):
-                            self._create_dataflow_ref(node, cell_id)
-
-                    elif (is_variable_exported_only_once or is_variable_ref_exist_in_cell_refs):
-                        cell_id = list(output_tags[node.id])[0] if output_tags.get(node.id) else list(cell_refs[node.id])[0]
+                    if not (self.display_code and is_variable_exported_only_once and cell_id in self.output_tags[node.id]):
                         self._create_dataflow_ref(node, cell_id)
 
-                else: # reversion case
+                elif (is_variable_exported_only_once or is_variable_ref_exist_in_cell_refs):
+                    cell_id = list(self.output_tags[node.id])[0] if self.output_tags.get(node.id) else list(self.cell_refs[node.id])[0]
+                    self._create_dataflow_ref(node, cell_id)
+
+            else: # reversion case
+                
+                if is_variable_ref_exist_in_cell_refs: 
                     
-                    if is_variable_ref_exist_in_cell_refs: 
-                        
-                        # first exported variable's cell id
-                        cell_id = list(cell_refs[node.id])[0]
+                    # first exported variable's cell id
+                    cell_id = list(self.cell_refs[node.id])[0]
 
-                        is_variable_deleted = not output_tags_exists
-                        is_variable_exported_second_time = output_tags_exists and len(output_tags[node.id]) == 2 and cell_id in output_tags[node.id]
-                        is_variable_UUID_changed = output_tags_exists and cell_id not in output_tags[node.id] 
+                    is_variable_deleted = not output_tags_exists
+                    is_variable_exported_second_time = output_tags_exists and len(self.output_tags[node.id]) == 2 and cell_id in self.output_tags[node.id]
+                    is_variable_UUID_changed = output_tags_exists and cell_id not in self.output_tags[node.id] 
 
-                        if is_variable_exported_second_time or is_variable_deleted or is_variable_UUID_changed:
-                            self._create_dataflow_ref(node, cell_id)
+                    if is_variable_exported_second_time or is_variable_deleted or is_variable_UUID_changed:
+                        self._create_dataflow_ref(node, cell_id)
 
-            self.generic_visit(node)
+        self.generic_visit(node)
 
-        def _create_dataflow_ref(self, node, cell_id):
-            ref = DataflowRef(
-                start_pos=(node.lineno, node.col_offset),
-                end_pos=(node.end_lineno, node.end_col_offset),
-                name=node.id,
-                cell_id=cell_id
-            )
-            self.updates.append(ref)
+    def _create_dataflow_ref(self, node, cell_id):
+        ref = DataflowRef(
+            start_pos=(node.lineno, node.col_offset),
+            end_pos=(node.end_lineno, node.end_col_offset),
+            name=node.id,
+            cell_id=cell_id
+        )
+        self.updates.append(ref)
 
-        # need to make sure we visit right side before left!
-        def visit_Assign(self, node):
+    # need to make sure we visit right side before left!
+    def visit_Assign(self, node):
+        self.visit(node.value)
+        for target in node.targets:
+            self.visit(target)
+
+    # FIXME we should rewrite augmented assignments to
+    # deal with c += 12 where c is referencing another
+    # cell's output
+    def visit_AugAssign(self, node):
+        self.visit(node.value)
+        self.visit(node.target)
+
+    def visit_AnnAssign(self, node):
+        if node.value:
             self.visit(node.value)
-            for target in node.targets:
-                self.visit(target)
+        self.visit(node.annotation)
+        self.visit(node.target)
 
-        # FIXME we should rewrite augmented assignments to
-        # deal with c += 12 where c is referencing another
-        # cell's output
-        def visit_AugAssign(self, node):
-            self.visit(node.value)
-            self.visit(node.target)
+    def visit_Subscript(self, node):
+        if (self.reversion and isinstance(node.value, ast.Name)
+            and node.value.id == '__dfvar__'):
+            # print("NODE SLICE VALUE:", node.slice.value)
+            ref_data = json.loads(node.slice.value)
+            if ref_data.get('name') and all(ref_data['name'] not in s for s in self.scope):
+                if (self.output_tags.get(ref_data['name']) and len(self.output_tags[ref_data['name']]) == 1 and
+                    ref_data['cell_id'] in self.output_tags[ref_data['name']]
+                    and len(self.cell_refs[ref_data['name']]) == 1):  # last line added to resolve ambiguity when multiple refs exists
+                    ref_data['cell_id']='@default_ref'
+                    ref_data['cell_tag'] = None
+                    ref = DataflowRef(
+                        start_pos=(node.lineno, node.col_offset),
+                        end_pos=(node.end_lineno, node.end_col_offset),
+                        **ref_data  # Unpack the updated ref_data
+                    )
+                    self.updates.append(ref)
 
-        def visit_AnnAssign(self, node):
-            if node.value:
-                self.visit(node.value)
-            self.visit(node.annotation)
-            self.visit(node.target)
-
-        def visit_Subscript(self, node):
-            if (reversion and isinstance(node.value, ast.Name)
-                and node.value.id == '__dfvar__'):
-                # print("NODE SLICE VALUE:", node.slice.value)
-                ref_data = json.loads(node.slice.value)
-                if ref_data.get('name') and all(ref_data['name'] not in s for s in self.scope):
-                    if (output_tags.get(ref_data['name']) and len(output_tags[ref_data['name']]) == 1 and
-                        ref_data['cell_id'] in output_tags[ref_data['name']]
-                        and len(cell_refs[ref_data['name']]) == 1):  # last line added to resolve ambiguity when multiple refs exists
-                        ref_data['cell_id']='@default_ref'
-                        ref_data['cell_tag'] = None
-                        ref = DataflowRef(
-                            start_pos=(node.lineno, node.col_offset),
-                            end_pos=(node.end_lineno, node.end_col_offset),
-                            **ref_data  # Unpack the updated ref_data
-                        )
-                        self.updates.append(ref)
-
-            self.generic_visit(node)
-        
-        def process_function(self, node, add_name=True):
-            if add_name:
-                self.scope[-1].add(node.name)
-            func_args = set()
-            for a in itertools.chain(node.args.args, node.args.posonlyargs, node.args.kwonlyargs):
-                func_args.add(a.arg)
-            self.scope.append(func_args)
-            retval = self.generic_visit(node)
-            self.scope.pop()
-            return retval
-
-        def visit_FunctionDef(self, node):
-            return self.process_function(node)
-
-        def visit_AsyncFunctionDef(self, node):
-            return self.process_function(node)
-
-        def visit_Lambda(self, node):
-            return self.process_function(node, add_name=False)
-
-        def visit_ClassDef(self, node):
+        self.generic_visit(node)
+    
+    def process_function(self, node, add_name=True):
+        if add_name:
             self.scope[-1].add(node.name)
-            self.scope.append(set())
-            retval = self.generic_visit(node)
-            self.scope.pop()
-            return retval
+        func_args = set()
+        for a in itertools.chain(node.args.args, node.args.posonlyargs, node.args.kwonlyargs):
+            func_args.add(a.arg)
+        self.scope.append(func_args)
+        retval = self.generic_visit(node)
+        self.scope.pop()
+        return retval
 
-        def process_import(self, node):
-            for alias in node.names:
-                if alias.asname:
-                    self.scope[-1].add(alias.asname)
-                else:
-                    self.scope[-1].add(alias.name)
-            self.generic_visit(node)
+    def visit_FunctionDef(self, node):
+        return self.process_function(node)
 
-        def visit_Import(self, node):
-            self.process_import(node)
+    def visit_AsyncFunctionDef(self, node):
+        return self.process_function(node)
 
-        def visit_ImportFrom(self, node):
-            self.process_import(node)
+    def visit_Lambda(self, node):
+        return self.process_function(node, add_name=False)
 
-        def visit_ExceptHandler(self, node):
-            self.scope.append(set())
-            if node.name:
-                self.scope[-1].add(node.name)
-            retval = self.generic_visit(node)
-            self.scope.pop()
-            return retval
+    def visit_ClassDef(self, node):
+        self.scope[-1].add(node.name)
+        self.scope.append(set())
+        retval = self.generic_visit(node)
+        self.scope.pop()
+        return retval
 
-        def process_elt_comp(self, node):
-            self.scope.append(set())
-            for generator in node.generators:
-                self.visit(generator)
-            self.visit(node.elt)
-            self.scope.pop()
+    def process_import(self, node):
+        for alias in node.names:
+            if alias.asname:
+                self.scope[-1].add(alias.asname)
+            else:
+                self.scope[-1].add(alias.name)
+        self.generic_visit(node)
 
-        def visit_ListComp(self, node):
-            self.process_elt_comp(node)
+    def visit_Import(self, node):
+        self.process_import(node)
 
-        def visit_SetComp(self, node):
-            self.process_elt_comp(node)
+    def visit_ImportFrom(self, node):
+        self.process_import(node)
 
-        def visit_GeneratorExp(self, node):
-            self.process_elt_comp(node)
+    def visit_ExceptHandler(self, node):
+        self.scope.append(set())
+        if node.name:
+            self.scope[-1].add(node.name)
+        retval = self.generic_visit(node)
+        self.scope.pop()
+        return retval
 
-        def visit_DictComp(self, node):
-            self.scope.append(set())
-            for generator in node.generators:
-                self.visit(generator)
-            self.visit(node.key)
-            self.visit(node.value)
-            self.scope.pop()
+    def process_elt_comp(self, node):
+        self.scope.append(set())
+        for generator in node.generators:
+            self.visit(generator)
+        self.visit(node.elt)
+        self.scope.pop()
 
-        def visit_NamedExpr(self, node):
-            self.visit(node.value)
-            self.visit(node.target)
+    def visit_ListComp(self, node):
+        self.process_elt_comp(node)
 
+    def visit_SetComp(self, node):
+        self.process_elt_comp(node)
+
+    def visit_GeneratorExp(self, node):
+        self.process_elt_comp(node)
+
+    def visit_DictComp(self, node):
+        self.scope.append(set())
+        for generator in node.generators:
+            self.visit(generator)
+        self.visit(node.key)
+        self.visit(node.value)
+        self.scope.pop()
+
+    def visit_NamedExpr(self, node):
+        self.visit(node.value)
+        self.visit(node.target)
+    
+def ground_refs(s, dataflow_state, execution_count, replace_f=ref_replacer, input_tags={}, output_tags={}, cell_refs = {}, reversion = False, display_code = False):
+    updates = []
     tree = ast.parse(s)
-    linker = DataflowLinker()
+    linker = DataflowLinker(dataflow_state, execution_count, output_tags, cell_refs, reversion, display_code)
     linker.visit(tree)
 
     update_refs(linker.updates, dataflow_state, execution_count, input_tags)
