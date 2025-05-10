@@ -1,4 +1,4 @@
-# dfconvert
+# dfnbutils
 
 [![PyPI version](https://badge.fury.io/py/dfconvert.svg)](https://badge.fury.io/py/dfconvert)
 [![Build Status](https://travis-ci.org/dataflownb/dfconvert.svg?branch=beta-update)](https://travis-ci.org/dataflownb/dfconvert)
@@ -11,7 +11,7 @@ It relies on IPython core methods for some of the translation process so some ma
 
 ## Installation Instructions
 
-1. cd to outer `dfconvert` that contains `setup.py`.
+1. cd to outer `dfnbutils` that contains `setup.py`.
 2. `pip install .`
 
 
