@@ -116,35 +116,12 @@ def ground_refs(s, dataflow_state, execution_count, replace_f=ref_replacer, inpu
             elif isinstance(node.ctx, ast.Del):
                 self.scope[-1].discard(node.id)
             elif isinstance(node.ctx, ast.Load) and all(node.id not in s for s in self.scope):
-                output_tags_exists = output_tags.get(node.id)
-                is_variable_exported_only_once = output_tags_exists and len(output_tags[node.id]) == 1
-                is_variable_ref_exist_in_cell_refs = cell_refs.get(node.id) and len(cell_refs[node.id]) == 1
-                
-                if not reversion:
-                    if dataflow_state.has_external_link(node.id, execution_count):
-                        cell_id = dataflow_state.get_external_link(node.id, execution_count)
-
-                        if not (display_code and is_variable_exported_only_once and cell_id in output_tags[node.id]):
-                            self._create_dataflow_ref(node, cell_id)
-
-                    elif (is_variable_exported_only_once or is_variable_ref_exist_in_cell_refs):
-                        cell_id = list(output_tags[node.id])[0] if output_tags.get(node.id) else list(cell_refs[node.id])[0]
+                if dataflow_state.has_external_link(node.id, execution_count):
+                    var_ambiguous = node_id not in output_tags or len(output_tags[node.id]) > 1
+                    cell_id = dataflow_state.get_external_link(node.id, execution_count)
+                    if not display_code or var_ambiguous:
                         self._create_dataflow_ref(node, cell_id)
-
-                else: # reversion case
-                    
-                    if is_variable_ref_exist_in_cell_refs: 
-                        
-                        # first exported variable's cell id
-                        cell_id = list(cell_refs[node.id])[0]
-
-                        is_variable_deleted = not output_tags_exists
-                        is_variable_exported_second_time = output_tags_exists and len(output_tags[node.id]) == 2 and cell_id in output_tags[node.id]
-                        is_variable_UUID_changed = output_tags_exists and cell_id not in output_tags[node.id] 
-
-                        if is_variable_exported_second_time or is_variable_deleted or is_variable_UUID_changed:
-                            self._create_dataflow_ref(node, cell_id)
-
+            
             self.generic_visit(node)
 
         def _create_dataflow_ref(self, node, cell_id):
