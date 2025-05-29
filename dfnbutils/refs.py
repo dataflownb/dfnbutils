@@ -275,7 +275,10 @@ def convert_dollar(s, dataflow_state, execution_count, replace_f=ref_replacer, i
                 dollar_pos = dollar_pos[0], t.end                
                 just_started = False
             else: # DONE
-                if cell_ref in input_tags_rev:
+                if cell_ref in input_tags:
+                    cell_id = cell_ref
+                    cell_tag = input_tags[cell_ref]
+                elif cell_ref in input_tags_rev:
                     cell_tag = cell_ref
                     cell_id = input_tags_rev[cell_ref]
                 else:
