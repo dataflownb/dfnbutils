@@ -230,9 +230,8 @@ def ground_refs(s, dataflow_state, execution_count, replace_f=ref_replacer, inpu
     
     return run_replacer(s, linker.updates, replace_f)
 
-def convert_dollar(s, dataflow_state, execution_count, replace_f=ref_replacer, input_tags={}, output_tags={}):
-    input_tags_rev = {id: tag for tag, id in input_tags.items()}
-
+def convert_dollar(s, dataflow_state, execution_count, replace_f=ref_replacer, output_tags={}, input_tags={}, tag_remap={}):
+    input_tags_rev = {v: k for k, v in input_tags.items()}
     def positions_mesh(end, start):
         return end[0] == start[0] and end[1] == start[1]
 
@@ -275,16 +274,20 @@ def convert_dollar(s, dataflow_state, execution_count, replace_f=ref_replacer, i
                 dollar_pos = dollar_pos[0], t.end                
                 just_started = False
             else: # DONE
-                if cell_ref in input_tags:
-                    cell_id = cell_ref
-                    cell_tag = input_tags[cell_ref]
-                elif cell_ref in input_tags_rev:
-                    cell_tag = cell_ref
-                    cell_id = input_tags_rev[cell_ref]
+                if cell_ref in tag_remap:
+                    cell_tag = tag_remap[cell_ref]['tag']
+                    cell_id = tag_remap[cell_ref]['id']
                 else:
-                    cell_tag = None
-                    cell_id = cell_ref
-
+                    if cell_ref in input_tags:
+                        cell_id = cell_ref
+                        cell_tag = input_tags[cell_ref]
+                    elif cell_ref in input_tags_rev:
+                        cell_tag = cell_ref
+                        cell_id = input_tags_rev[cell_ref]
+                    else:
+                        cell_tag = None
+                        cell_id = cell_ref
+                                        
                 updates.append(DataflowRef(
                     start_pos=dollar_pos[0],
                     end_pos=dollar_pos[1],
