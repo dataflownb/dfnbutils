@@ -11,16 +11,15 @@ import itertools
 import re
 
 class DataflowRef:
-    __slots__ = ['start_pos','end_pos','name','cell_id','cell_tag','ref_qualifier','input_tags']
+    __slots__ = ['start_pos','end_pos','name','cell_id','cell_tag', 'is_ambiguous']
 
-    def __init__(self, start_pos=None, end_pos=None, name=None, cell_id=None, cell_tag=None, ref_qualifier=None, input_tags=None):
+    def __init__(self, start_pos=None, end_pos=None, name=None, cell_id=None, cell_tag=None, is_ambiguous=False):
         self.start_pos = start_pos
         self.end_pos = end_pos
         self.name = name
         self.cell_id = cell_id
         self.cell_tag = cell_tag
-        self.ref_qualifier = ref_qualifier
-        self.input_tags = input_tags
+        self.is_ambiguous = is_ambiguous
         
     @classmethod
     def fromstrstr(cls, s):
@@ -31,62 +30,40 @@ class DataflowRef:
             'name': self.name,
             'cell_id': self.cell_id,
             'cell_tag': self.cell_tag,
-            'ref_qualifier': self.ref_qualifier
+            'is_ambiguous': self.is_ambiguous,
         }))
 
     def __str__(self):
-        qualifier = self.ref_qualifier if self.ref_qualifier is not None else ''
-        
-        if self.cell_id == '@default_ref':
-            return f'{self.name}'
-        
-        reversed_input_tags = {id: tag for tag, id in self.input_tags.items()}
-        if self.cell_id in reversed_input_tags:
-            return f'{self.name}${qualifier}{reversed_input_tags[self.cell_id]}'
+        return self.to_str()
 
-        return f'{self.name}${qualifier}{self.cell_id}'
+    def to_str(self, persistent=True, use_tags=True):
+        if persistent:
+            return f'{self.name}${self.cell_id}'
+        else:
+            if not self.is_ambiguous:
+                return self.name
+            elif self.cell_tag is not None and use_tags:
+                return f'{self.name}${self.cell_tag}'
+            else:
+                return f'{self.name}${self.cell_id}'
 
     def __repr__(self):
-        return f'DataflowRef({self.start_pos}, {self.end_pos}, {self.name}, {self.cell_id}, {self.cell_tag}, {self.ref_qualifier})'
+        return f'DataflowRef({self.start_pos}, {self.end_pos}, {self.name}, {self.cell_id}, {self.cell_tag}, {self.is_ambiguous})'
 
 def identifier_replacer(ref):
     return f"__dfvar__[{ref.strstr()}]"
 
 def ref_replacer(ref):
-    # FIXME deal with tags and qualifiers
     return f"_oh['{ref.cell_id}']['{ref.name}']"
 
 def dollar_replacer(ref):
-    return str(ref)
+    return ref.to_str(persistent=True, use_tags=False)
 
-def update_refs(refs, dataflow_state, execution_count, input_tags):
-    for ref in refs:
-        if ref.ref_qualifier == '^' or (not ref.cell_tag and not ref.cell_id):
-            # get latest cell_id
-            # FIXME is_external_link needs to be updated to find
-            # the external link that is not the current uuid...
-            if dataflow_state.has_external_link(ref.name, execution_count):
-                ref.cell_id = dataflow_state.get_external_link(ref.name, execution_count)
-            # print("ASSIGNING CELL_ID:", ref.cell_id)
-
-        if ref.cell_tag is not None:
-            if ref.cell_tag not in input_tags:
-                if ref.ref_qualifier == '^':
-                    ref.cell_tag = None
-                else:
-                    pass
-                    # raise ValueError(f"Cell with tag '{ref.cell_tag}' does not exist")
-            else:
-                if ref.ref_qualifier == '=' and ref.cell_id and ref.cell_id != input_tags[ref.cell_tag]:
-                    pass
-                    # raise ValueError(f"Tag '{ref.cell_tag}' no longer references cell '{ref.cell_id}'. Consider removing the = qualifier.")
-                else:
-                    if ref.cell_id and ref.cell_id != input_tags[ref.cell_tag]:
-                        if ref.ref_qualifier == '^':
-                            ref.cell_tag = None
-                        else:
-                            ref.cell_id = input_tags[ref.cell_tag]
-        # print("REF OUT:", ref)
+def dollar_disp_replacer(ref):
+    return ref.to_str(persistent=False, use_tags=True)
+    
+def dollar_disp_no_tag_replacer(ref):
+    return ref.to_str(persistent=False, use_tags=False)
 
 def run_replacer(s, refs, replace_f):
     code_arr = s.splitlines()
@@ -99,7 +76,18 @@ def run_replacer(s, refs, replace_f):
             line[:ref.start_pos[1]] + replace_f(ref) + line[ref.end_pos[1]:]
     return '\n'.join(code_arr)    
 
-def ground_refs(s, dataflow_state, execution_count, replace_f=ref_replacer, input_tags={}, output_tags={}, cell_refs = {}, reversion = False, display_code = False):
+def refs_to_dict(refs):
+    identifier_refs = defaultdict(set)
+    for ref in refs:
+        identifier_refs[ref.name].add(ref.cell_id)
+    return dict(identifier_refs)
+
+def is_ambiguous(name, cell_id, output_tags):
+    return (name not in output_tags 
+        or len(output_tags[name]) > 1
+        or cell_id not in output_tags[name])
+
+def ground_refs(s, dataflow_state, execution_count, replace_f=ref_replacer, input_tags={}, output_tags={}, cell_refs=None):
     updates = []
 
     class DataflowLinker(ast.NodeVisitor):
@@ -116,43 +104,27 @@ def ground_refs(s, dataflow_state, execution_count, replace_f=ref_replacer, inpu
             elif isinstance(node.ctx, ast.Del):
                 self.scope[-1].discard(node.id)
             elif isinstance(node.ctx, ast.Load) and all(node.id not in s for s in self.scope):
-                output_tags_exists = output_tags.get(node.id)
-                is_variable_exported_only_once = output_tags_exists and len(output_tags[node.id]) == 1
-                is_variable_ref_exist_in_cell_refs = cell_refs.get(node.id) and len(cell_refs[node.id]) == 1
-                
-                if not reversion:
-                    if dataflow_state.has_external_link(node.id, execution_count):
-                        cell_id = dataflow_state.get_external_link(node.id, execution_count)
-
-                        if not (display_code and is_variable_exported_only_once and cell_id in output_tags[node.id]):
-                            self._create_dataflow_ref(node, cell_id)
-
-                    elif (is_variable_exported_only_once or is_variable_ref_exist_in_cell_refs):
-                        cell_id = list(output_tags[node.id])[0] if output_tags.get(node.id) else list(cell_refs[node.id])[0]
-                        self._create_dataflow_ref(node, cell_id)
-
-                else: # reversion case
-                    
-                    if is_variable_ref_exist_in_cell_refs: 
-                        
-                        # first exported variable's cell id
-                        cell_id = list(cell_refs[node.id])[0]
-
-                        is_variable_deleted = not output_tags_exists
-                        is_variable_exported_second_time = output_tags_exists and len(output_tags[node.id]) == 2 and cell_id in output_tags[node.id]
-                        is_variable_UUID_changed = output_tags_exists and cell_id not in output_tags[node.id] 
-
-                        if is_variable_exported_second_time or is_variable_deleted or is_variable_UUID_changed:
-                            self._create_dataflow_ref(node, cell_id)
+                # FIXME this isn't quite right if we run for any cell
+                # as sometimes, we may want to retarget a cell
+                if cell_refs is not None and node.id in cell_refs:
+                    cell_ids = cell_refs[node.id]
+                    assert len(cell_ids) == 1, "Multiple cell references found for unambiguous ref!"
+                    cell_id = cell_ids[0]
+                    self._create_dataflow_ref(node, cell_id, is_ambiguous=is_ambiguous(node.id, cell_id, output_tags))
+                elif dataflow_state.has_external_link(node.id, execution_count):
+                    cell_id = dataflow_state.get_external_link(node.id, execution_count)
+                    self._create_dataflow_ref(node, cell_id, is_ambiguous=is_ambiguous(node.id, cell_id, output_tags))
 
             self.generic_visit(node)
 
-        def _create_dataflow_ref(self, node, cell_id):
+        def _create_dataflow_ref(self, node, cell_id, is_ambiguous=False):
             ref = DataflowRef(
                 start_pos=(node.lineno, node.col_offset),
                 end_pos=(node.end_lineno, node.end_col_offset),
                 name=node.id,
-                cell_id=cell_id
+                cell_id=cell_id,
+                cell_tag=input_tags.get(cell_id, None),
+                is_ambiguous=is_ambiguous,
             )
             self.updates.append(ref)
 
@@ -174,26 +146,6 @@ def ground_refs(s, dataflow_state, execution_count, replace_f=ref_replacer, inpu
                 self.visit(node.value)
             self.visit(node.annotation)
             self.visit(node.target)
-
-        def visit_Subscript(self, node):
-            if (reversion and isinstance(node.value, ast.Name)
-                and node.value.id == '__dfvar__'):
-                # print("NODE SLICE VALUE:", node.slice.value)
-                ref_data = json.loads(node.slice.value)
-                if ref_data.get('name') and all(ref_data['name'] not in s for s in self.scope):
-                    if (output_tags.get(ref_data['name']) and len(output_tags[ref_data['name']]) == 1 and
-                        ref_data['cell_id'] in output_tags[ref_data['name']]
-                        and len(cell_refs[ref_data['name']]) == 1):  # last line added to resolve ambiguity when multiple refs exists
-                        ref_data['cell_id']='@default_ref'
-                        ref_data['cell_tag'] = None
-                        ref = DataflowRef(
-                            start_pos=(node.lineno, node.col_offset),
-                            end_pos=(node.end_lineno, node.end_col_offset),
-                            **ref_data  # Unpack the updated ref_data
-                        )
-                        self.updates.append(ref)
-
-            self.generic_visit(node)
         
         def process_function(self, node, add_name=True):
             if add_name:
@@ -275,12 +227,11 @@ def ground_refs(s, dataflow_state, execution_count, replace_f=ref_replacer, inpu
     tree = ast.parse(s)
     linker = DataflowLinker()
     linker.visit(tree)
-
-    update_refs(linker.updates, dataflow_state, execution_count, input_tags)
     
     return run_replacer(s, linker.updates, replace_f)
 
-def convert_dollar(s, dataflow_state, execution_count, replace_f=ref_replacer, input_tags={}, reversion = False, tag_refs = {}):
+def convert_dollar(s, dataflow_state, execution_count, replace_f=ref_replacer, output_tags={}, input_tags={}, tag_remap={}):
+    input_tags_rev = {v: k for k, v in input_tags.items()}
     def positions_mesh(end, start):
         return end[0] == start[0] and end[1] == start[1]
 
@@ -296,30 +247,16 @@ def convert_dollar(s, dataflow_state, execution_count, replace_f=ref_replacer, i
 
     """
     References can look like:
-      * df or df$tag or df$f1f1f1 or df$tag$f1f1f1
-      * df$^ or df$^f1f1f1 or df$^tag or df$^tag$f1f1f1
-      * df$= or df$=f1f1f1 or df$=tag or df$=tag$f1f1f1
-      * df$~tag or df$~tag$f1f1f1
-
-    FIXME Do we need tilde?
+      * df or df$tag or df$f1f1f1
     """
     for t in tokenize.generate_tokens(s_stream.readline):
         if t.string == '$':
-            if dollar_pos is not None and t.end[1] - t.start[1] == 1 and positions_mesh(dollar_pos[1], t.start):
-                # second $ sign for tags
-                cell_ref += t.string
-                dollar_pos = dollar_pos[0], t.end
-                just_started = False
-            elif last_token is not None and positions_mesh(last_token.end, t.start):
+            if last_token is not None and positions_mesh(last_token.end, t.start):
                 dollar_pos = last_token.start, t.end
                 var_name = last_token.string
                 just_started = True
         elif dollar_pos is not None:
-            if just_started and t.string in ['^','=','~'] and t.end[1] - t.start[1] == 1 and positions_mesh(dollar_pos[1], t.start):
-                ref_qualifier = t.string
-                dollar_pos = dollar_pos[0], t.end
-                just_started = False
-            elif t.type == 2 and positions_mesh(dollar_pos[1], t.start): # NUMBER
+            if t.type == 2 and positions_mesh(dollar_pos[1], t.start): # NUMBER
                 t_string = t.string
                 t_end = t.end
                 while (
@@ -337,27 +274,28 @@ def convert_dollar(s, dataflow_state, execution_count, replace_f=ref_replacer, i
                 dollar_pos = dollar_pos[0], t.end                
                 just_started = False
             else: # DONE
-                if '$' in cell_ref:
-                    cell_tag, cell_id = cell_ref.split('$')
-                elif cell_ref in input_tags:
-                    cell_tag = cell_ref
-                    cell_id = input_tags[cell_ref]
+                if cell_ref in tag_remap:
+                    cell_tag = tag_remap[cell_ref]['tag']
+                    cell_id = tag_remap[cell_ref]['id']
                 else:
-                    cell_tag = None
-                    cell_id = cell_ref
-
-                if reversion and tag_refs:
-                    if cell_id in tag_refs and cell_id not in input_tags:
-                        cell_id = tag_refs[cell_id] 
-
+                    if cell_ref in input_tags:
+                        cell_id = cell_ref
+                        cell_tag = input_tags[cell_ref]
+                    elif cell_ref in input_tags_rev:
+                        cell_tag = cell_ref
+                        cell_id = input_tags_rev[cell_ref]
+                    else:
+                        cell_tag = None
+                        cell_id = cell_ref
+                                        
                 updates.append(DataflowRef(
                     start_pos=dollar_pos[0],
                     end_pos=dollar_pos[1],
                     name=var_name,
                     cell_id=cell_id,
                     cell_tag=cell_tag,
-                    ref_qualifier=ref_qualifier)
-                )
+                    is_ambiguous=is_ambiguous(var_name, cell_id, output_tags)
+                ))
                 dollar_pos = None
                 var_name = None
                 ref_qualifier = None
@@ -370,24 +308,20 @@ def convert_dollar(s, dataflow_state, execution_count, replace_f=ref_replacer, i
             last_token = t
 
     # print("UPDATES:", updates)
-    update_refs(updates, dataflow_state, execution_count, input_tags)
     return run_replacer(s, updates, replace_f)
 
-def convert_identifier(s, replace_f=ref_replacer, input_tags={}):
+def convert_identifier(s, replace_f=ref_replacer):
     class DataflowReplacer(ast.NodeVisitor):
         def __init__(self):
             self.updates = []
             super().__init__()
 
         def visit_Subscript(self, node):
-            if (isinstance(node.value, ast.Name)
-                and node.value.id == '__dfvar__'):
-                # print("NODE SLICE VALUE:", node.slice.value)
+            if (isinstance(node.value, ast.Name) and node.value.id == '__dfvar__'):
                 ref = DataflowRef(
                     start_pos=(node.lineno, node.col_offset),
                     end_pos=(node.end_lineno, node.end_col_offset),
                     **json.loads(node.slice.value), 
-                    input_tags=input_tags
                 )
             
                 self.updates.append(ref)
@@ -397,23 +331,4 @@ def convert_identifier(s, replace_f=ref_replacer, input_tags={}):
     linker = DataflowReplacer()
     linker.visit(tree)
 
-    return run_replacer(s, linker.updates, replace_f)
-
-def get_references(s):
-    class GetReferences(ast.NodeVisitor):
-        def visit_Subscript(self, node):
-            if (isinstance(node.value, ast.Name)
-                and node.value.id == '__dfvar__'):
-                node_value = json.loads(node.slice.value)
-                if not identifier_refs.get(node_value["cell_id"]):
-                    identifier_refs[node_value["cell_id"]] = set()
-                identifier_refs[node_value["cell_id"]].add(node_value["name"])
-                    
-            self.generic_visit(node)
-
-    identifier_refs = {}
-    tree = ast.parse(s)
-    linker = GetReferences()
-    linker.visit(tree)
-
-    return identifier_refs
+    return run_replacer(s, linker.updates, replace_f), refs_to_dict(linker.updates)
