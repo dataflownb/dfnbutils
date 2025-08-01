@@ -117,11 +117,26 @@ def ground_refs(s, dataflow_state, execution_count, replace_f=ref_replacer, inpu
 
             self.generic_visit(node)
 
-        def _create_dataflow_ref(self, node, cell_id, is_ambiguous=False):
+        def visit_Subscript(self, node):
+            if isinstance(node.value, ast.Name) and node.value.id == '__dfvar__':
+                ref = DataflowRef(**json.loads(node.slice.value))
+                if all(ref.name not in s for s in self.scope):
+                    # allow it to become unambiguous...
+                    ambiguous = is_ambiguous(ref.name, ref.cell_id, output_tags)
+                    self._create_dataflow_ref(node, ref.cell_id, is_ambiguous=ambiguous, name=ref.name)
+                else:
+                    # cannot be unambiguous
+                    self._create_dataflow_ref(node, ref.cell_id, is_ambiguous=True, name=ref.name)
+
+            self.generic_visit(node)
+
+        def _create_dataflow_ref(self, node, cell_id, is_ambiguous=False, name=None):
+            if name is None:
+                name = node.id
             ref = DataflowRef(
                 start_pos=(node.lineno, node.col_offset),
                 end_pos=(node.end_lineno, node.end_col_offset),
-                name=node.id,
+                name=name,
                 cell_id=cell_id,
                 cell_tag=input_tags.get(cell_id, None),
                 is_ambiguous=is_ambiguous,
