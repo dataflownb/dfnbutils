@@ -280,7 +280,8 @@ def ground_refs(s, dataflow_state, execution_count, replace_f=ref_replacer, inpu
     
     return run_replacer(s, linker.updates, replace_f)
 
-def convert_dollar(s, dataflow_state, execution_count, replace_f=ref_replacer, input_tags={}, reversion = False, tag_refs = {}):
+# add new parameter in the method , which is used for replace tag
+def convert_dollar(s, dataflow_state, execution_count, replace_f=ref_replacer, input_tags={}, reversion = False, tag_refs = {}, code_cell_refs={}, replacing_tag_name = None, replaced_tag_cell_id = None):
     def positions_mesh(end, start):
         return end[0] == start[0] and end[1] == start[1]
 
@@ -345,10 +346,14 @@ def convert_dollar(s, dataflow_state, execution_count, replace_f=ref_replacer, i
                 else:
                     cell_tag = None
                     cell_id = cell_ref
-
+          
                 if reversion and tag_refs:
                     if cell_id in tag_refs and cell_id not in input_tags:
-                        cell_id = tag_refs[cell_id] 
+                        cell_id = tag_refs[cell_id]
+                    # Replace tag code is here (3 lines)
+                    if cell_tag == replacing_tag_name and cell_id not in code_cell_refs[var_name] and replaced_tag_cell_id in code_cell_refs[var_name]:
+                        cell_id = replaced_tag_cell_id
+                        cell_tag = None
 
                 updates.append(DataflowRef(
                     start_pos=dollar_pos[0],
